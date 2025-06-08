@@ -3,6 +3,7 @@ const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
 const fs = require("fs");
 const { Document, Packer, Paragraph, TextRun } = require("docx");
+const { spawn } = require("child_process");
 
 const client = new Client({
   puppeteer: {
@@ -23,7 +24,8 @@ const conversationStates = {};
 const userData = {};
 const timeouts = {};
 
-// --- NUEVO: Configuración de objetivos y rangos ---
+
+
 const OBJETIVOS_CONFIG = {
   "Generar leads": {
     palabras: [600, 1200],
@@ -43,7 +45,6 @@ const OBJETIVOS_CONFIG = {
   },
 };
 
-// Calcula el promedio de rangos si hay dos objetivos, o usa el rango único si hay uno
 function calcularLongitudYCaracteres(objetivos) {
   if (!objetivos || !Array.isArray(objetivos) || objetivos.length === 0) {
     return { longitud: "800", caracteres: "6000" };
@@ -62,7 +63,6 @@ function calcularLongitudYCaracteres(objetivos) {
     }
   });
   const n = objetivos.length;
-  // Promedio si hay dos, o único si hay uno
   return {
     longitud: Math.round((palabrasMin + palabrasMax) / (2 * n)).toString(),
     caracteres: Math.round(
@@ -71,18 +71,15 @@ function calcularLongitudYCaracteres(objetivos) {
   };
 }
 
-// --- NUEVO: Manejo de inactividad de 45 minutos ---
 function setLongTimeouts(from) {
   clearLongTimeouts(from);
   timeouts[from] = timeouts[from] || {};
-  // Primer recordatorio a los 45 minutos
   timeouts[from].longRecordatorio = setTimeout(async () => {
     if (conversationStates[from] !== "ended") {
       await client.sendMessage(
         from,
         "¿Cómo estás? ¿Necesitas algo más?\nEscribe '0' para cerrar el chat y despedirme."
       );
-      // Segundo timeout: cerrar chat a los 90 minutos
       timeouts[from].longFinalizacion = setTimeout(async () => {
         if (conversationStates[from] !== "ended") {
           await client.sendMessage(
@@ -92,9 +89,9 @@ function setLongTimeouts(from) {
           conversationStates[from] = "ended";
           clearTimeouts(from);
         }
-      }, 45 * 60 * 1000); // 45 minutos más
+      }, 45 * 60 * 1000);
     }
-  }, 45 * 60 * 1000); // 45 minutos
+  }, 45 * 60 * 1000);
 }
 
 function clearLongTimeouts(from) {
@@ -127,6 +124,31 @@ function handleError(from, error) {
   clearTimeouts(from);
 }
 
+// --- INTEGRACIÓN CON chat.py ---
+function obtenerRespuestaChatGPT(prompt) {
+  return new Promise((resolve, reject) => {
+    const py = spawn("python", ["chat.py", prompt]);
+    let data = "";
+    let error = "";
+
+    py.stdout.on("data", (chunk) => {
+      data += chunk.toString();
+    });
+
+    py.stderr.on("data", (chunk) => {
+      error += chunk.toString();
+    });
+
+    py.on("close", (code) => {
+      if (code === 0) {
+        resolve(data.trim());
+      } else {
+        reject(error || "Error ejecutando chat.py");
+      }
+    });
+  });
+}
+
 client.on("qr", (qr) => {
   try {
     qrcode.generate(qr, { small: true });
@@ -151,7 +173,6 @@ client.on("message", async (msg) => {
   const from = msg.from;
   const body = msg.body.trim();
 
-  // --- NUEVO: Permitir cerrar chat con '0' en cualquier momento ---
   if (body === "0" && conversationStates[from] !== "ended") {
     await client.sendMessage(
       from,
@@ -163,7 +184,6 @@ client.on("message", async (msg) => {
   }
 
   try {
-    // Evita doble respuesta si el usuario manda varios mensajes al inicio
     if (!conversationStates[from]) {
       conversationStates[from] = "saludo";
       userData[from] = {};
@@ -177,7 +197,6 @@ client.on("message", async (msg) => {
         if (conversationStates[from] === "saludo") {
           conversationStates[from] = "esperando_tipo_contenido";
           await client.sendMessage(from, "Opciones:\n1. Blog");
-          // Recordatorio y finalización por inactividad
           timeouts[from] = timeouts[from] || {};
           timeouts[from].recordatorio = setTimeout(async () => {
             if (conversationStates[from] === "esperando_tipo_contenido") {
@@ -199,12 +218,10 @@ client.on("message", async (msg) => {
       return;
     }
 
-    setLongTimeouts(from); // Reinicia el timeout largo en cada mensaje
+    setLongTimeouts(from);
 
-    // Flujo principal
     switch (conversationStates[from]) {
       case "saludo":
-        // Ignora mensajes extra mientras espera la opción
         break;
 
       case "esperando_tipo_contenido":
@@ -259,7 +276,6 @@ client.on("message", async (msg) => {
       case "esperando_objetivo":
         clearTimeouts(from);
         setLongTimeouts(from);
-        // Permitir seleccionar hasta 2 objetivos
         if (!userData[from].objetivosSeleccionados)
           userData[from].objetivosSeleccionados = [];
         let objetivo = "";
@@ -268,15 +284,12 @@ client.on("message", async (msg) => {
           if (body === "2") objetivo = "Educar al cliente";
           if (body === "3") objetivo = "Posicionar producto";
           if (body === "4") objetivo = "Aumentar tráfico web";
-          // Evitar duplicados y máximo 2 objetivos
           if (
             !userData[from].objetivosSeleccionados.includes(objetivo) &&
             userData[from].objetivosSeleccionados.length < 2
           ) {
             userData[from].objetivosSeleccionados.push(objetivo);
           }
-
-          // Calcular longitud y caracteres según los objetivos seleccionados
           const { longitud, caracteres } = calcularLongitudYCaracteres(
             userData[from].objetivosSeleccionados
           );
@@ -289,8 +302,6 @@ client.on("message", async (msg) => {
           );
           return;
         }
-
-        // Solo preguntar si desea agregar otro objetivo si tiene 1 objetivo, y solo si aún no tiene 2
         if (userData[from].objetivosSeleccionados.length === 1) {
           conversationStates[from] = "agregar_otro_objetivo";
           await client.sendMessage(
@@ -298,7 +309,6 @@ client.on("message", async (msg) => {
             "¿Deseas agregar otro objetivo?\n1. Sí\n2. No"
           );
         } else if (userData[from].objetivosSeleccionados.length === 2) {
-          // Si ya tiene 2, continuar sin volver a preguntar
           userData[from].objetivo =
             userData[from].objetivosSeleccionados.join(" y ");
           userData[from].keyword = userData[from].campania;
@@ -309,17 +319,22 @@ client.on("message", async (msg) => {
           );
           setTimeout(async () => {
             try {
-              const blog = generarPromptBlog(userData[from]);
-              userData[from].blog = blog;
-              conversationStates[from] = "ajustar_exportar";
-              await client.sendMessage(
-                from,
-                `Aquí tienes tu blog (prompt generado):\n\n${blog}`
-              );
-              await client.sendMessage(
-                from,
-                "¿Deseas ajustar o exportar?\n1. Ajustar\n2. Exportar como .doc"
-              );
+              const prompt = generarPromptBlog(userData[from]);
+              try {
+                const respuesta = await obtenerRespuestaChatGPT(prompt);
+                userData[from].blog = respuesta;
+                conversationStates[from] = "ajustar_exportar";
+                await client.sendMessage(
+                  from,
+                  `Aquí tienes tu blog:\n\n${respuesta}`
+                );
+                await client.sendMessage(
+                  from,
+                  "¿Deseas ajustar o exportar?\n1. Ajustar\n2. Exportar como .doc"
+                );
+              } catch (error) {
+                handleError(from, error);
+              }
             } catch (error) {
               handleError(from, error);
             }
@@ -331,7 +346,6 @@ client.on("message", async (msg) => {
         clearTimeouts(from);
         setLongTimeouts(from);
         if (body === "1") {
-          // Solo permitir agregar un segundo objetivo si aún no tiene 2
           if (
             userData[from].objetivosSeleccionados &&
             userData[from].objetivosSeleccionados.length < 2
@@ -342,7 +356,6 @@ client.on("message", async (msg) => {
               "Selecciona el segundo objetivo:\n1. Generar leads\n2. Educar al cliente\n3. Posicionar producto\n4. Aumentar tráfico web"
             );
           } else {
-            // Si ya tiene 2, continuar directamente
             userData[from].objetivo =
               userData[from].objetivosSeleccionados.join(" y ");
             userData[from].keyword = userData[from].campania;
@@ -353,24 +366,28 @@ client.on("message", async (msg) => {
             );
             setTimeout(async () => {
               try {
-                const blog = generarPromptBlog(userData[from]);
-                userData[from].blog = blog;
-                conversationStates[from] = "ajustar_exportar";
-                await client.sendMessage(
-                  from,
-                  `Aquí tienes tu blog (prompt generado):\n\n${blog}`
-                );
-                await client.sendMessage(
-                  from,
-                  "¿Deseas ajustar o exportar?\n1. Ajustar\n2. Exportar como .doc"
-                );
+                const prompt = generarPromptBlog(userData[from]);
+                try {
+                  const respuesta = await obtenerRespuestaChatGPT(prompt);
+                  userData[from].blog = respuesta;
+                  conversationStates[from] = "ajustar_exportar";
+                  await client.sendMessage(
+                    from,
+                    `Aquí tienes tu blog:\n\n${respuesta}`
+                  );
+                  await client.sendMessage(
+                    from,
+                    "¿Deseas ajustar o exportar?\n1. Ajustar\n2. Exportar como .doc"
+                  );
+                } catch (error) {
+                  handleError(from, error);
+                }
               } catch (error) {
                 handleError(from, error);
               }
             }, 3000);
           }
         } else if (body === "2" || /^no$/i.test(body)) {
-          // Si elige no, continuar
           userData[from].objetivo =
             userData[from].objetivosSeleccionados.join(" y ");
           userData[from].keyword = userData[from].campania;
@@ -381,17 +398,22 @@ client.on("message", async (msg) => {
           );
           setTimeout(async () => {
             try {
-              const blog = generarPromptBlog(userData[from]);
-              userData[from].blog = blog;
-              conversationStates[from] = "ajustar_exportar";
-              await client.sendMessage(
-                from,
-                `Aquí tienes tu blog (prompt generado):\n\n${blog}`
-              );
-              await client.sendMessage(
-                from,
-                "¿Deseas ajustar o exportar?\n1. Ajustar\n2. Exportar como .doc"
-              );
+              const prompt = generarPromptBlog(userData[from]);
+              try {
+                const respuesta = await obtenerRespuestaChatGPT(prompt);
+                userData[from].blog = respuesta;
+                conversationStates[from] = "ajustar_exportar";
+                await client.sendMessage(
+                  from,
+                  `Aquí tienes tu blog:\n\n${respuesta}`
+                );
+                await client.sendMessage(
+                  from,
+                  "¿Deseas ajustar o exportar?\n1. Ajustar\n2. Exportar como .doc"
+                );
+              } catch (error) {
+                handleError(from, error);
+              }
             } catch (error) {
               handleError(from, error);
             }
@@ -415,17 +437,22 @@ client.on("message", async (msg) => {
           );
           setTimeout(async () => {
             try {
-              const blog = generarPromptBlog(userData[from]);
-              userData[from].blog = blog;
-              conversationStates[from] = "ajustar_exportar";
-              await client.sendMessage(
-                from,
-                `Aquí tienes tu blog (prompt generado):\n\n${blog}`
-              );
-              await client.sendMessage(
-                from,
-                "¿Deseas ajustar o exportar?\n1. Ajustar\n2. Exportar como .doc"
-              );
+              const prompt = generarPromptBlog(userData[from]);
+              try {
+                const respuesta = await obtenerRespuestaChatGPT(prompt);
+                userData[from].blog = respuesta;
+                conversationStates[from] = "ajustar_exportar";
+                await client.sendMessage(
+                  from,
+                  `Aquí tienes tu blog:\n\n${respuesta}`
+                );
+                await client.sendMessage(
+                  from,
+                  "¿Deseas ajustar o exportar?\n1. Ajustar\n2. Exportar como .doc"
+                );
+              } catch (error) {
+                handleError(from, error);
+              }
             } catch (error) {
               handleError(from, error);
             }
@@ -469,7 +496,6 @@ client.on("message", async (msg) => {
             });
             const buffer = await Packer.toBuffer(doc);
 
-            // Enviar el documento directamente como archivo adjunto (sin guardarlo en disco)
             const media = new MessageMedia(
               "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
               buffer.toString("base64"),
@@ -504,19 +530,24 @@ client.on("message", async (msg) => {
         await client.sendMessage(from, "Generando el blog ajustado...");
         setTimeout(async () => {
           try {
-            // Aquí deberías ajustar el prompt y llamar a Python de nuevo
-            const blog = generarPromptBlog(userData[from], body);
-            userData[from].blog = blog;
-            conversationStates[from] = "ajustar_exportar";
-            await client.sendMessage(
-              from,
-              `Aquí tienes tu blog ajustado:\n\n${blog}`
-            );
-            // --- AJUSTE: enviar el menú de ajuste/exportar en un mensaje aparte ---
-            await client.sendMessage(
-              from,
-              "¿Deseas ajustar o exportar?\n1. Ajustar\n2. Exportar como .doc"
-            );
+            const promptAjuste = generarPromptBlog(userData[from], body);
+            try {
+              const respuestaAjuste = await obtenerRespuestaChatGPT(
+                promptAjuste
+              );
+              userData[from].blog = respuestaAjuste;
+              conversationStates[from] = "ajustar_exportar";
+              await client.sendMessage(
+                from,
+                `Aquí tienes tu blog ajustado:\n\n${respuestaAjuste}`
+              );
+              await client.sendMessage(
+                from,
+                "¿Deseas ajustar o exportar?\n1. Ajustar\n2. Exportar como .doc"
+              );
+            } catch (error) {
+              handleError(from, error);
+            }
           } catch (error) {
             handleError(from, error);
           }
@@ -524,7 +555,6 @@ client.on("message", async (msg) => {
         break;
 
       case "exportando_doc":
-        // Ignora mensajes mientras exporta
         break;
 
       case "crear_otro":
@@ -544,7 +574,6 @@ client.on("message", async (msg) => {
           );
           conversationStates[from] = "ended";
         } else if (body === "3") {
-          // Aquí puedes agregar lógica para otro tipo de contenido si lo deseas
           await client.sendMessage(
             from,
             "Funcionalidad para crear otro tipo de contenido próximamente."
@@ -587,7 +616,6 @@ client.on("message", async (msg) => {
   }
 });
 
-// Prompt generator
 function generarPromptBlog(data, ajuste = "") {
   return `
 Eres un Especialista en SEO, Diseñador Web, Desarrollador Front-End y Redactor Persuasivo para sitios web.
